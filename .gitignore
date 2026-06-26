@@ -1,0 +1,12 @@
+# built binaries
+/secret-broker
+/secret-broker-linux-amd64
+/dist/
+*.test
+
+# never commit real secrets or live config
+/etc/
+secrets/
+config.json
+*.key
+.env

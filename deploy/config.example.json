@@ -1,0 +1,21 @@
+{
+  "listen": "127.0.0.1:8080",
+  "secretsDir": "/etc/secret-broker/secrets",
+  "upstreams": {
+    "tw": {
+      "base": "https://api.twitterapi.io",
+      "header": "x-api-key",
+      "secret": "twitterapi",
+      "allow": [["GET", "^/twitter/.+"]]
+    },
+    "cr": {
+      "base": "https://api.cryptorank.io",
+      "header": "X-Api-Key",
+      "secret": "cryptorank",
+      "allow": [["GET", "^/v2/.+"]]
+    }
+  },
+  "agents": {
+    "scout": { "tokenRef": "token_scout", "selectors": ["tw", "cr"] }
+  }
+}
