@@ -55,6 +55,48 @@ secret is injected into which upstream — is **root-only config**, never writab
 through the proxy, so an agent can never bind an existing key to a destination it
 controls. See [`deploy/config.example.json`](deploy/config.example.json).
 
+Two optional per-upstream knobs shape how a request is handled:
+
+- **`inject`** — how the stored secret becomes the outbound credential:
+  - *(omitted)* — set the raw value under `header` (the `x-api-key` style).
+  - `"bearer"` — send `Authorization: Bearer <secret>` (`header` unused).
+  - `"github-basic"` — send `Authorization: Basic base64("x-access-token:"+secret)`,
+    the form GitHub accepts for both git-over-HTTPS and the API, for a PAT or an App
+    installation token.
+- **`mode`** — `"git"` switches from JSON-API handling to transparent forwarding
+  for git's smart-HTTP protocol: the client's content-type/protocol/compression
+  headers pass through untouched and bodies stream without a size or time cap
+  (a real clone/push runs for minutes). Default handling forces
+  `Accept: application/json` and is right for REST/GraphQL.
+
+## GitHub access
+
+One raw token in the store (`github`) backs both the REST/GraphQL API (`gh`
+upstream, `inject: bearer`) and git clone/push (`ghgit` upstream, `mode: git` +
+`inject: github-basic`). Store the **raw** PAT — the broker adds the scheme:
+
+```sh
+# On your workstation — value never in argv/history/disk, root-only on the VM.
+printf 'PAT: '; stty -echo; IFS= read -r P; stty echo; printf '\n'
+printf %s "$P" | ssh vm 'sudo secret-broker add github'; unset P
+ssh vm 'sudo secret-broker list'   # confirm by fingerprint, never value
+```
+
+Agent side (VM), pointing git at the broker with only its low-value broker token:
+
+```sh
+# Route github.com through the broker; the broker injects the real credential.
+git config --global url."http://127.0.0.1:8080/ghgit/".insteadOf "https://github.com/"
+# Authenticate to the broker (loopback only) — scoped so the token goes nowhere else.
+git config --global http."http://127.0.0.1:8080/".extraHeader "Authorization: Bearer $BROKER_TOKEN"
+git clone https://github.com/RinwaOwuogba/kora-copilot.git   # rewritten → broker → github
+```
+
+For read-only agents, drop the `git-receive-pack` (push) rule and the write verbs
+from the allowlist; to pin to specific repos, replace `[^/]+/[^/]+` with `owner/repo`.
+The token's own scope (repos + permissions) is the outer bound — the allowlist
+narrows within it and is the only thing the agent can see.
+
 ## Build & deploy
 
 ```sh

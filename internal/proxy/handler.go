@@ -6,13 +6,24 @@
 package proxy
 
 import (
+	"context"
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"git.hq.shrd.dev/Shrd/secret-broker/internal/config"
 	"git.hq.shrd.dev/Shrd/secret-broker/internal/route"
+)
+
+// Per-request deadlines are applied in the handler (not the shared client) so they
+// can depend on the upstream's mode: a JSON API call should finish quickly, but a
+// git clone or push of a real repository legitimately runs for minutes.
+const (
+	apiTimeout = 30 * time.Second
+	gitTimeout = 30 * time.Minute
 )
 
 // Store is the read-only secret dependency (satisfied by secret.DirStore).
@@ -75,21 +86,38 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 5. Build the outbound request. Critically, do NOT carry the caller's
-	// Authorization (the broker token) upstream; inject only the credential header.
+	// Authorization (the broker token) upstream; inject only the credential.
+	timeout := apiTimeout
+	if up.Mode == config.ModeGit {
+		timeout = gitTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
 	outURL := up.Base + upath
 	if r.URL.RawQuery != "" {
 		outURL += "?" + r.URL.RawQuery
 	}
-	outReq, err := http.NewRequestWithContext(r.Context(), r.Method, outURL, r.Body)
+	outReq, err := http.NewRequestWithContext(ctx, r.Method, outURL, r.Body)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	outReq.Header.Set("Accept", "application/json")
-	if ct := r.Header.Get("Content-Type"); ct != "" {
-		outReq.Header.Set("Content-Type", ct)
+	if up.Mode == config.ModeGit {
+		// git negotiates content type, protocol version, and compression through its
+		// own headers, so forward them verbatim (minus hop-by-hop and the broker token)
+		// instead of forcing JSON. Content-Length rides on the request field below.
+		copyHeaders(outReq.Header, r.Header, skipReqHeaders)
+		outReq.ContentLength = r.ContentLength
+	} else {
+		outReq.Header.Set("Accept", "application/json")
+		if ct := r.Header.Get("Content-Type"); ct != "" {
+			outReq.Header.Set("Content-Type", ct)
+		}
 	}
-	outReq.Header.Set(up.Header, key)
+	// Injection always overwrites any client-supplied auth, so the broker token
+	// (used in step 1) can never reach the upstream.
+	injectCredential(outReq, up, key)
 
 	// 6. Forward.
 	resp, err := h.client().Do(outReq)
@@ -101,7 +129,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
+	if up.Mode == config.ModeGit {
+		copyHeaders(w.Header(), resp.Header, skipRespHeaders)
+	} else if ct := resp.Header.Get("Content-Type"); ct != "" {
 		w.Header().Set("Content-Type", ct)
 	}
 	w.WriteHeader(resp.StatusCode)
@@ -124,6 +154,52 @@ func (h *Handler) log() *slog.Logger {
 		return h.Logger
 	}
 	return slog.Default()
+}
+
+// injectCredential attaches the real secret to the outbound request. The scheme is
+// chosen by the upstream's Inject setting; the secret itself is never logged.
+func injectCredential(req *http.Request, up *config.Upstream, key string) {
+	switch up.Inject {
+	case config.InjectBearer:
+		req.Header.Set("Authorization", "Bearer "+key)
+	case config.InjectGitHubBasic:
+		// GitHub's git-over-HTTPS (and its API) take the token as the HTTP Basic
+		// password under username "x-access-token" — the form that works for both a
+		// PAT and a GitHub App installation token.
+		cred := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + key))
+		req.Header.Set("Authorization", "Basic "+cred)
+	default: // verbatim: set the stored value as-is under the configured header
+		req.Header.Set(up.Header, key)
+	}
+}
+
+// Hop-by-hop headers are connection-scoped (RFC 7230 §6.1) and must not cross a
+// proxy. The request set additionally drops Authorization — the caller's broker
+// token, replaced by the injected credential — and Content-Length, carried on the
+// request's ContentLength field instead.
+var skipReqHeaders = map[string]bool{
+	"Authorization": true, "Content-Length": true,
+	"Connection": true, "Proxy-Connection": true, "Keep-Alive": true,
+	"Proxy-Authenticate": true, "Proxy-Authorization": true,
+	"Te": true, "Trailer": true, "Transfer-Encoding": true, "Upgrade": true,
+}
+
+var skipRespHeaders = map[string]bool{
+	"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true,
+	"Proxy-Authorization": true, "Te": true, "Trailer": true,
+	"Transfer-Encoding": true, "Upgrade": true,
+}
+
+// copyHeaders forwards every header in src except the connection-scoped ones in skip.
+func copyHeaders(dst, src http.Header, skip map[string]bool) {
+	for k, vs := range src {
+		if skip[http.CanonicalHeaderKey(k)] {
+			continue
+		}
+		for _, v := range vs {
+			dst.Add(k, v)
+		}
+	}
 }
 
 // splitPath turns "/sel/rest/of/path" into ("sel", "/rest/of/path", true).

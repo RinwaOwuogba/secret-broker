@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -89,15 +90,26 @@ func cmdServe(args []string, stderr io.Writer) int {
 		Agents:    cfg.Agents,
 		Authn:     proxy.NewTokenAuthn(tokenToAgent),
 		Secrets:   store,
-		Client:    &http.Client{Timeout: 30 * time.Second},
-		Logger:    logger,
+		// No total client timeout: a git clone/push legitimately streams for minutes,
+		// and the handler applies a per-request, mode-aware deadline instead. A
+		// response-header timeout still fails fast on a hung upstream.
+		Client: &http.Client{
+			Transport: &http.Transport{
+				DialContext:           (&net.Dialer{Timeout: 10 * time.Second}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+				ForceAttemptHTTP2:     true,
+			},
+		},
+		Logger: logger,
 	}
 	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           h,
+		Addr:    cfg.Listen,
+		Handler: h,
+		// Only the header read is globally bounded, so a large git body isn't severed
+		// mid-stream; per-request deadlines live in the handler. The listener is
+		// loopback-only, so the slow-client surface is limited to local agents.
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
 	}
 	logger.Info("serving", "addr", cfg.Listen, "upstreams", len(cfg.Upstreams), "agents", len(cfg.Agents))
 	if err := srv.ListenAndServe(); err != nil {
