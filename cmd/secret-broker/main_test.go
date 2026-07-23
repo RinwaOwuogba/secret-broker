@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -41,6 +43,31 @@ func TestAddListRemoveRoundTrip(t *testing.T) {
 	code, out, _ = runCLI(t, "", "list", "-dir", dir)
 	if code != 0 || strings.Contains(out, "twitterapi") {
 		t.Fatalf("secret still listed after rm: %q", out)
+	}
+}
+
+func TestReadSecretValueNonTTY(t *testing.T) {
+	// The interactive TTY (echo-off) path can't be exercised without a pty, but the
+	// non-terminal paths must read the stream verbatim and never be mistaken for a TTY.
+
+	// A plain reader (as the CLI tests use) reads everything.
+	got, err := readSecretValue(strings.NewReader("ghp_secret\n"), io.Discard, "k")
+	if err != nil || string(got) != "ghp_secret\n" {
+		t.Fatalf("reader path = %q, %v", got, err)
+	}
+
+	// A real *os.File that is a pipe must be detected as NOT a terminal and read fully.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { io.WriteString(w, "piped-secret"); w.Close() }()
+	if isTerminal(r) {
+		t.Fatal("a pipe must not be detected as a terminal")
+	}
+	got, err = readSecretValue(r, io.Discard, "k")
+	if err != nil || string(got) != "piped-secret" {
+		t.Fatalf("os.Pipe path = %q, %v", got, err)
 	}
 }
 

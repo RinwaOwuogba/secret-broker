@@ -9,6 +9,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"time"
 
 	"git.hq.shrd.dev/Shrd/secret-broker/internal/config"
@@ -132,7 +134,7 @@ func cmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 2
 	}
 	name := fs.Arg(0)
-	val, err := io.ReadAll(stdin)
+	val, err := readSecretValue(stdin, stderr, name)
 	if err != nil {
 		fmt.Fprintln(stderr, "read stdin:", err)
 		return 1
@@ -152,6 +154,56 @@ func cmdAdd(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "registered %s (sha256:%s)\n", name, fp)
 	return 0
+}
+
+// readSecretValue reads the secret from stdin. When stdin is an interactive
+// terminal it prompts and disables echo, so a typed or pasted secret never lands
+// on screen or in scrollback; when stdin is piped or redirected — the recommended
+// path (`printf %s "$KEY" | secret-broker add name`) — it reads the stream verbatim.
+func readSecretValue(stdin io.Reader, stderr io.Writer, name string) ([]byte, error) {
+	f, ok := stdin.(*os.File)
+	if !ok || !isTerminal(f) {
+		return io.ReadAll(stdin)
+	}
+	// Disable echo BEFORE prompting so there is no window in which even an instantly
+	// pasted secret could be echoed (getpass ordering).
+	if restore, err := disableEcho(f); err != nil {
+		// Don't silently echo the secret: warn, but keep going so the operator can
+		// still register it (or ^C if visible input is unacceptable).
+		fmt.Fprintf(stderr, "warning: could not disable echo (%v) — value will be visible\n", err)
+	} else {
+		defer restore()
+	}
+	fmt.Fprintf(stderr, "Enter value for %q (input hidden): ", name)
+	line, err := bufio.NewReader(f).ReadString('\n')
+	fmt.Fprintln(stderr) // move past the hidden input line
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	return []byte(line), nil
+}
+
+// isTerminal reports whether f is a character device (a TTY), using only stdlib.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+}
+
+// disableEcho turns off terminal echo on f, returning a closure that restores it.
+// It shells out to stty rather than pulling in golang.org/x/term, keeping the
+// binary dependency-free (a stated design goal); stty exists on every Unix this
+// runs on. Canonical (line) mode is left intact, so a single Enter ends the input.
+func disableEcho(f *os.File) (restore func(), err error) {
+	if err := stty(f, "-echo"); err != nil {
+		return nil, err
+	}
+	return func() { _ = stty(f, "echo") }, nil
+}
+
+func stty(tty *os.File, arg string) error {
+	cmd := exec.Command("stty", arg)
+	cmd.Stdin = tty // stty acts on its stdin, i.e. the terminal
+	return cmd.Run()
 }
 
 func cmdList(args []string, stdout, stderr io.Writer) int {

@@ -34,6 +34,8 @@ This is enforced by the OS, not by hoping the agent behaves:
 ```sh
 # register secrets (root) — value on stdin, never in argv/history
 printf %s "$TWITTERAPI_IO_KEY" | sudo secret-broker add twitterapi
+# or type it interactively — input is hidden (echo disabled), like a password prompt:
+sudo secret-broker add twitterapi
 sudo secret-broker list            # names + sha256 fingerprints, never values
 sudo secret-broker rm  twitterapi
 
