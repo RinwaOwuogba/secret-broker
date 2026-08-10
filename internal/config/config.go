@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"os"
 
-	"git.hq.shrd.dev/Shrd/secret-broker/internal/route"
+	"github.com/RinwaOwuogba/secret-broker/internal/route"
 )
 
 // Upstream is one proxied API: where to forward, which header carries the

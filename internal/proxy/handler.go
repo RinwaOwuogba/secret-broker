@@ -11,8 +11,8 @@ import (
 	"net/http"
 	"strings"
 
-	"git.hq.shrd.dev/Shrd/secret-broker/internal/config"
-	"git.hq.shrd.dev/Shrd/secret-broker/internal/route"
+	"github.com/RinwaOwuogba/secret-broker/internal/config"
+	"github.com/RinwaOwuogba/secret-broker/internal/route"
 )
 
 // Store is the read-only secret dependency (satisfied by secret.DirStore).

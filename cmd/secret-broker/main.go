@@ -17,9 +17,9 @@ import (
 	"os"
 	"time"
 
-	"git.hq.shrd.dev/Shrd/secret-broker/internal/config"
-	"git.hq.shrd.dev/Shrd/secret-broker/internal/proxy"
-	"git.hq.shrd.dev/Shrd/secret-broker/internal/secret"
+	"github.com/RinwaOwuogba/secret-broker/internal/config"
+	"github.com/RinwaOwuogba/secret-broker/internal/proxy"
+	"github.com/RinwaOwuogba/secret-broker/internal/secret"
 )
 
 const (

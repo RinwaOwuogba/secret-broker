@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"git.hq.shrd.dev/Shrd/secret-broker/internal/config"
-	"git.hq.shrd.dev/Shrd/secret-broker/internal/route"
+	"github.com/RinwaOwuogba/secret-broker/internal/config"
+	"github.com/RinwaOwuogba/secret-broker/internal/route"
 )
 
 type mapStore map[string]string
