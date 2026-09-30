@@ -74,6 +74,52 @@ func TestLoadRejectsMissingFields(t *testing.T) {
 	}
 }
 
+func TestLoadInjectSchemes(t *testing.T) {
+	body := `{"listen":":8080","secretsDir":"/s","upstreams":{
+		"gh":{"base":"https://api.github.com","inject":"bearer","secret":"github","allow":[["GET","^/repos/.+"]]},
+		"ghgit":{"base":"https://github.com","mode":"git","inject":"github-basic","secret":"github","allow":[["POST","^/[^/]+/[^/]+/git-receive-pack$"]]}
+	},"agents":{"a":{"tokenRef":"t","selectors":["gh","ghgit"]}}}`
+	cfg, err := Load(write(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Upstreams["gh"].Inject != InjectBearer {
+		t.Fatalf("bearer inject not parsed: %+v", cfg.Upstreams["gh"])
+	}
+	if g := cfg.Upstreams["ghgit"]; g.Mode != ModeGit || g.Inject != InjectGitHubBasic {
+		t.Fatalf("git upstream not parsed: %+v", g)
+	}
+}
+
+func TestLoadInjectSchemeNeedsNoHeader(t *testing.T) {
+	// bearer/github-basic derive the Authorization header, so `header` is optional.
+	body := `{"listen":":8080","secretsDir":"/s","upstreams":{"u":{"base":"https://x","inject":"bearer","secret":"s","allow":[["GET","^/.+"]]}},"agents":{}}`
+	if _, err := Load(write(t, body)); err != nil {
+		t.Fatalf("bearer inject should not require header: %v", err)
+	}
+}
+
+func TestLoadInjectSchemeStillNeedsSecret(t *testing.T) {
+	body := `{"listen":":8080","secretsDir":"/s","upstreams":{"u":{"base":"https://x","inject":"bearer","allow":[["GET","^/.+"]]}},"agents":{}}`
+	if _, err := Load(write(t, body)); err == nil {
+		t.Fatal("expected error: inject scheme requires secret")
+	}
+}
+
+func TestLoadRejectsUnknownInject(t *testing.T) {
+	body := `{"listen":":8080","secretsDir":"/s","upstreams":{"u":{"base":"https://x","inject":"whoops","secret":"s","allow":[["GET","^/.+"]]}},"agents":{}}`
+	if _, err := Load(write(t, body)); err == nil {
+		t.Fatal("expected error: unknown inject scheme")
+	}
+}
+
+func TestLoadRejectsUnknownMode(t *testing.T) {
+	body := `{"listen":":8080","secretsDir":"/s","upstreams":{"u":{"base":"https://x","header":"h","secret":"s","mode":"weird","allow":[["GET","^/.+"]]}},"agents":{}}`
+	if _, err := Load(write(t, body)); err == nil {
+		t.Fatal("expected error: unknown mode")
+	}
+}
+
 func TestLoadRejectsBadAllowArity(t *testing.T) {
 	body := `{"listen":":8080","secretsDir":"/s","upstreams":{"u":{"base":"https://x","header":"h","secret":"s","allow":[["GET"]]}},"agents":{}}`
 	if _, err := Load(write(t, body)); err == nil {

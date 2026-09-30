@@ -13,9 +13,30 @@
       "header": "X-Api-Key",
       "secret": "cryptorank",
       "allow": [["GET", "^/v2/.+"]]
+    },
+    "gh": {
+      "base": "https://api.github.com",
+      "inject": "bearer",
+      "secret": "github",
+      "allow": [
+        ["GET", "^/repos/[^/]+/[^/]+(/.*)?$"],
+        ["POST", "^/repos/[^/]+/[^/]+/(issues|pulls)(/.*)?$"]
+      ]
+    },
+    "ghgit": {
+      "base": "https://github.com",
+      "mode": "git",
+      "inject": "github-basic",
+      "secret": "github",
+      "allow": [
+        ["GET", "^/[^/]+/[^/]+/info/refs$"],
+        ["POST", "^/[^/]+/[^/]+/git-upload-pack$"],
+        ["POST", "^/[^/]+/[^/]+/git-receive-pack$"]
+      ]
     }
   },
   "agents": {
-    "scout": { "tokenRef": "token_scout", "selectors": ["tw", "cr"] }
+    "scout": { "tokenRef": "token_scout", "selectors": ["tw", "cr"] },
+    "dev": { "tokenRef": "token_dev", "selectors": ["gh", "ghgit"] }
   }
 }

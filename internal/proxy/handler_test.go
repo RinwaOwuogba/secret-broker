@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
@@ -68,6 +69,118 @@ func TestProxyInjectsSecretAndStripsBrokerToken(t *testing.T) {
 	}
 	if gotAuth != "" {
 		t.Fatalf("broker token leaked upstream: Authorization=%q", gotAuth)
+	}
+}
+
+func TestProxyBearerInjection(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	h, _, _ := fixture(t, mapStore{"github": "ghp_RAWPAT"})
+	up := h.Upstreams["tw"]
+	up.Base, up.Secret, up.Inject = upstream.URL, "github", config.InjectBearer
+
+	req := httptest.NewRequest("GET", "/tw/twitter/user/info", nil)
+	req.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotAuth != "Bearer ghp_RAWPAT" {
+		t.Fatalf("upstream Authorization=%q, want the injected Bearer token", gotAuth)
+	}
+}
+
+func TestProxyGitHubBasicInjection(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+	}))
+	defer upstream.Close()
+
+	h, _, _ := fixture(t, mapStore{"github": "ghp_RAWPAT"})
+	up := h.Upstreams["tw"]
+	up.Base, up.Secret, up.Inject = upstream.URL, "github", config.InjectGitHubBasic
+
+	req := httptest.NewRequest("GET", "/tw/twitter/user/info", nil)
+	req.Header.Set("Authorization", "Bearer good-token")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghp_RAWPAT"))
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotAuth != want {
+		t.Fatalf("upstream Authorization=%q, want %q", gotAuth, want)
+	}
+}
+
+// git mode must forward the client's own protocol headers untouched (not force
+// JSON), stream the request body, inject Basic auth, drop the broker token, and
+// pass the upstream's response headers back — everything a git clone/push needs.
+func TestProxyGitModeTransparentForwarding(t *testing.T) {
+	var gotAccept, gotCT, gotProto, gotAuth string
+	var gotBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccept = r.Header.Get("Accept")
+		gotCT = r.Header.Get("Content-Type")
+		gotProto = r.Header.Get("Git-Protocol")
+		gotAuth = r.Header.Get("Authorization")
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+		w.WriteHeader(200)
+		fmt.Fprint(w, "PACKACK")
+	}))
+	defer upstream.Close()
+
+	rule, _ := route.NewRule("POST", `^/[^/]+/[^/]+/git-receive-pack$`)
+	h, _, _ := fixture(t, mapStore{"github": "ghp_RAWPAT"})
+	h.Upstreams["tw"] = &config.Upstream{
+		Base: upstream.URL, Secret: "github",
+		Inject: config.InjectGitHubBasic, Mode: config.ModeGit,
+		Rules: []route.Rule{rule},
+	}
+
+	req := httptest.NewRequest("POST", "/tw/RinwaOwuogba/kora-copilot.git/git-receive-pack", strings.NewReader("PACKDATA"))
+	req.Header.Set("Authorization", "Bearer good-token") // broker token — must be stripped
+	req.Header.Set("Accept", "application/x-git-receive-pack-result")
+	req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
+	req.Header.Set("Git-Protocol", "version=2")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotAccept != "application/x-git-receive-pack-result" {
+		t.Fatalf("Accept altered: %q (git mode must not force JSON)", gotAccept)
+	}
+	if gotCT != "application/x-git-receive-pack-request" {
+		t.Fatalf("Content-Type not forwarded: %q", gotCT)
+	}
+	if gotProto != "version=2" {
+		t.Fatalf("Git-Protocol not forwarded: %q", gotProto)
+	}
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghp_RAWPAT"))
+	if gotAuth != wantAuth {
+		t.Fatalf("upstream Authorization=%q, want %q", gotAuth, wantAuth)
+	}
+	if string(gotBody) != "PACKDATA" {
+		t.Fatalf("request body not forwarded: %q", gotBody)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/x-git-receive-pack-result" {
+		t.Fatalf("response Content-Type not forwarded: %q", ct)
+	}
+	if rec.Body.String() != "PACKACK" {
+		t.Fatalf("response body=%q", rec.Body.String())
 	}
 }
 
