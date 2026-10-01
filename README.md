@@ -13,9 +13,26 @@ agent ──Bearer <token>──► secret-broker :8080/<sel>/<path> ──injec
         (holds only a token)            (holds the real keys, allowlists, logs)
 ```
 
+## Deployment topology
+
+Run the broker **outside the agent's machine**. The reference setup:
+
+```
+host (bare metal) ── secret-broker, listens on the VM bridge only (e.g. 192.168.122.1:8080)
+  └── libvirt VM ── agent (Claude Code); reaches the broker over the bridge, holds only its token
+```
+
+The broker binds to the private VM bridge, not to the host's public interface.
+The keys never exist inside the VM, so they stay out of reach even if the agent
+has root there (an agent with `sudo` is the common case). Running the broker on
+the same machine as the agent works too (`listen: 127.0.0.1:8080`), but then the
+user separation below is the only barrier, and it holds only while the agent has
+no root.
+
 ## Why the agent can't read the raw secrets
 
-This is enforced by the OS, not by hoping the agent behaves:
+First, by location: in the topology above the secrets are on another machine.
+On the broker host itself, the OS enforces the rest, not the agent's good behavior:
 
 - **Separate user.** The broker runs as `broker`; agents run as a different user
   (e.g. `dev`). Secret files are `root:broker 0640` in a `2750` (setgid) dir, so
@@ -43,11 +60,12 @@ sudo secret-broker rm  twitterapi
 secret-broker serve -config /etc/secret-broker/config.json
 ```
 
-Agent side — no real key anywhere:
+Agent side — no real key anywhere (`$BROKER` is the broker's address, e.g.
+`http://192.168.122.1:8080` from a libvirt VM):
 
 ```sh
 curl -H "Authorization: Bearer $BROKER_TOKEN" \
-  "http://127.0.0.1:8080/tw/twitter/user/info?userName=winsznx"
+  "$BROKER/tw/twitter/user/info?userName=winsznx"
 ```
 
 ## Configuration
@@ -78,19 +96,18 @@ upstream, `inject: bearer`) and git clone/push (`ghgit` upstream, `mode: git` +
 `inject: github-basic`). Store the **raw** PAT — the broker adds the scheme:
 
 ```sh
-# On your workstation — value never in argv/history/disk, root-only on the VM.
-printf 'PAT: '; stty -echo; IFS= read -r P; stty echo; printf '\n'
-printf %s "$P" | ssh vm 'sudo secret-broker add github'; unset P
-ssh vm 'sudo secret-broker list'   # confirm by fingerprint, never value
+# On the broker host, as root — input is hidden; the value never hits argv/history/disk.
+secret-broker add github
+secret-broker list                 # confirm by fingerprint, never value
 ```
 
 Agent side (VM), pointing git at the broker with only its low-value broker token:
 
 ```sh
 # Route github.com through the broker; the broker injects the real credential.
-git config --global url."http://127.0.0.1:8080/ghgit/".insteadOf "https://github.com/"
-# Authenticate to the broker (loopback only) — scoped so the token goes nowhere else.
-git config --global http."http://127.0.0.1:8080/".extraHeader "Authorization: Bearer $BROKER_TOKEN"
+git config --global url."$BROKER/ghgit/".insteadOf "https://github.com/"
+# Authenticate to the broker — scoped to its address so the token goes nowhere else.
+git config --global http."$BROKER/".extraHeader "Authorization: Bearer $BROKER_TOKEN"
 git clone https://github.com/RinwaOwuogba/kora-copilot.git   # rewritten → broker → github
 ```
 
@@ -99,15 +116,34 @@ from the allowlist; to pin to specific repos, replace `[^/]+/[^/]+` with `owner/
 The token's own scope (repos + permissions) is the outer bound — the allowlist
 narrows within it and is the only thing the agent can see.
 
+The same pattern works for a self-hosted Gitea: add an upstream cloned from
+`ghgit` with `base` set to the Gitea URL and a Gitea access token as its secret
+(Gitea accepts the token as the Basic-auth password). Use a dedicated,
+*restricted* bot user so the token reaches only the repos it is granted.
+
 ## Build & deploy
 
 ```sh
 go test ./...                                   # full suite
 GOOS=linux GOARCH=amd64 go build -o secret-broker-linux-amd64 ./cmd/secret-broker
-scp secret-broker-linux-amd64 vm:
-ssh vm 'sudo ./secret-broker-linux-amd64 ... '  # or run deploy/setup.sh from the repo
-sudo deploy/setup.sh ./secret-broker-linux-amd64
+scp -r secret-broker-linux-amd64 deploy broker-host:   # the host, not the agent's VM
+# on broker-host, as root:
+deploy/setup.sh ./secret-broker-linux-amd64     # broker user, dirs, systemd unit, config
 ```
+
+Then set `"listen"` in `/etc/secret-broker/config.json` to the VM bridge address
+(e.g. `192.168.122.1:8080`). That address exists only after libvirt brings up
+the bridge, so order the unit after it:
+
+```ini
+# /etc/systemd/system/secret-broker.service.d/virbr0.conf
+[Unit]
+After=libvirtd.service
+Wants=libvirtd.service
+StartLimitIntervalSec=0
+```
+
+`systemctl daemon-reload && systemctl enable --now secret-broker`.
 
 Zero external dependencies (Go stdlib only).
 
